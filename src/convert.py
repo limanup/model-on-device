@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a wav2vec2 CTC model to Core ML at three precisions.
+"""Convert a wav2vec2 CTC model to Core ML.
 
 The interesting part is not the conversion call. It is that the ONNX route
 does not survive contact with this model, so the script traces the PyTorch
@@ -15,11 +15,9 @@ import argparse
 import shutil
 import sys
 import time
-import wave
 from pathlib import Path
 
 import coremltools as ct
-import numpy as np
 import torch
 from transformers import AutoModelForCTC
 
@@ -28,30 +26,18 @@ INPUT_NAME = "input_values"
 SAMPLE_RATE = 16_000
 MAX_SAMPLES = 30 * SAMPLE_RATE  # 30 s, the longest input the app recorded
 
-PRECISIONS = ("fp32", "fp16", "int8")
+PRECISIONS = ("fp32", "fp16")
 
 
 def load_model(model_id: str) -> AutoModelForCTC:
     print(f"loading {model_id}")
-    model = AutoModelForCTC.from_pretrained(model_id)
+    # torchscript=True is what makes this model traceable: it returns a tuple
+    # of tensors rather than a ModelOutput dataclass, which the tracer can
+    # flatten. transformers 5 removed the flag, which is why it is pinned
+    # below 5 in requirements.txt.
+    model = AutoModelForCTC.from_pretrained(model_id, torchscript=True)
     model.eval()
     return model
-
-
-class Logits(torch.nn.Module):
-    """Return the bare tensor.
-
-    transformers 5 removed the `torchscript=True` flag that used to make CTC
-    models traceable. Wrapping the module and returning logits is the
-    version-proof equivalent, and it keeps the Core ML output a single tensor.
-    """
-
-    def __init__(self, model: AutoModelForCTC) -> None:
-        super().__init__()
-        self.model = model
-
-    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
-        return self.model(input_values).logits
 
 
 def trace(model: AutoModelForCTC) -> torch.jit.ScriptModule:
@@ -59,10 +45,13 @@ def trace(model: AutoModelForCTC) -> torch.jit.ScriptModule:
 
     Tracing fixes the graph; RangeDim fixes the shape the Core ML model will
     accept at runtime. Both are needed, and they are not the same thing.
+
+    model.eval() is not optional. A traced dropout is a wrong model and it
+    fails silently, scoring nothing like the checkpoint it came from.
     """
     dummy = torch.rand(1, SAMPLE_RATE)
     with torch.no_grad():
-        return torch.jit.trace(Logits(model), dummy)
+        return torch.jit.trace(model, dummy)
 
 
 def input_types() -> list[ct.TensorType]:
@@ -70,44 +59,7 @@ def input_types() -> list[ct.TensorType]:
     return [ct.TensorType(name=INPUT_NAME, shape=(1, sequence))]
 
 
-def read_wav(path: Path) -> np.ndarray:
-    """Mono float32 at 16 kHz. Refuses anything else rather than resampling."""
-    with wave.open(str(path), "rb") as handle:
-        if handle.getnchannels() != 1 or handle.getframerate() != SAMPLE_RATE:
-            raise ValueError(f"{path.name}: need mono 16 kHz, got "
-                             f"{handle.getnchannels()}ch {handle.getframerate()}Hz")
-        frames = handle.readframes(handle.getnframes())
-    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-
-
-def calibration_data(directory: Path | None, count: int = 10) -> list[dict]:
-    """Representative audio for INT8.
-
-    Without a directory this falls back to random noise, which is a weak
-    calibration set and is called out as a limitation in REPORT.md. Point
-    --calibration-dir at ten 16 kHz mono wavs for numbers you can trust.
-    """
-    samples: list[dict] = []
-    if directory is not None:
-        paths = sorted(directory.glob("*.wav"))[:count]
-        if not paths:
-            raise SystemExit(f"no .wav files in {directory}")
-        for path in paths:
-            samples.append({INPUT_NAME: read_wav(path)[None, :]})
-        print(f"calibrating on {len(samples)} wav files from {directory}")
-        return samples
-
-    rng = np.random.default_rng(0)
-    print(f"calibrating on {count} random noise samples (weak; see REPORT.md)")
-    for _ in range(count):
-        length = int(rng.integers(SAMPLE_RATE, 10 * SAMPLE_RATE))
-        noise = rng.standard_normal((1, length)).astype(np.float32)
-        samples.append({INPUT_NAME: noise})
-    return samples
-
-
-def convert(model_id: str, precision: str, out_dir: Path,
-            calibration_dir: Path | None) -> Path:
+def convert(model_id: str, precision: str, out_dir: Path) -> Path:
     traced = trace(load_model(model_id))
 
     kwargs: dict = {
@@ -117,11 +69,11 @@ def convert(model_id: str, precision: str, out_dir: Path,
     }
     if precision == "fp16":
         kwargs["compute_precision"] = ct.precision.FLOAT16
-    elif precision == "int8":
-        kwargs["optimization_config"] = ct.OptimizationConfig(
-            global_config=ct.OpLinearQuantizerConfig(mode="linear_symmetric"),
-        )
-        kwargs["calibration_data"] = calibration_data(calibration_dir)
+    else:
+        # mlprogram defaults to FLOAT16 weights. Without this line "FP32"
+        # produces a 631 MB model that is already half precision, and the
+        # comparison is meaningless.
+        kwargs["compute_precision"] = ct.precision.FLOAT32
 
     print(f"converting {precision} ...")
     started = time.perf_counter()
@@ -154,22 +106,12 @@ def main() -> int:
     parser.add_argument("--model-id", default=DEFAULT_MODEL)
     parser.add_argument("--precision", choices=(*PRECISIONS, "all"), default="all")
     parser.add_argument("--out", type=Path, default=Path("models"))
-    parser.add_argument("--calibration-dir", type=Path, default=None,
-                        help="directory of 16 kHz mono wavs for INT8 calibration")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
     wanted = PRECISIONS if args.precision == "all" else (args.precision,)
     for precision in wanted:
-        try:
-            convert(args.model_id, precision, args.out, args.calibration_dir)
-        except Exception as exc:  # noqa: BLE001
-            print(f"{precision} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            if precision == "int8":
-                print("INT8 is optional; FP32 and FP16 are the required artifacts.",
-                      file=sys.stderr)
-                continue
-            raise
+        convert(args.model_id, precision, args.out)
     return 0
 
 
