@@ -55,7 +55,7 @@ def audio(seconds: int, seed: int = 0) -> np.ndarray:
 
 
 def load_torch(model_id: str) -> AutoModelForCTC:
-    model = AutoModelForCTC.from_pretrained(model_id, torchscript=True)
+    model = AutoModelForCTC.from_pretrained(model_id)
     model.eval()
     return model
 
@@ -63,8 +63,7 @@ def load_torch(model_id: str) -> AutoModelForCTC:
 def torch_logits(model: AutoModelForCTC, samples: np.ndarray) -> np.ndarray:
     with torch.no_grad():
         out = model(torch.from_numpy(samples))
-    logits = out[0] if isinstance(out, tuple) else out.logits
-    return logits.detach().numpy()
+    return out.logits.detach().numpy()
 
 
 def agreement(reference: np.ndarray, candidate: np.ndarray) -> float:

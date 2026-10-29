@@ -1,4 +1,7 @@
-coremltools>=8.3
-numpy>=1.26
-torch>=2.4
-transformers>=4.44
+# Pinned to the combination that is known to convert. coremltools prints a
+# "torch has not been tested" warning outside this window, and transformers 5
+# removed the tracing flag this code used to rely on.
+coremltools>=8.3,<10
+numpy>=1.26,<3
+torch>=2.4,<2.9
+transformers>=4.44,<5

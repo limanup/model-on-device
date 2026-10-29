@@ -33,9 +33,25 @@ PRECISIONS = ("fp32", "fp16", "int8")
 
 def load_model(model_id: str) -> AutoModelForCTC:
     print(f"loading {model_id}")
-    model = AutoModelForCTC.from_pretrained(model_id, torchscript=True)
+    model = AutoModelForCTC.from_pretrained(model_id)
     model.eval()
     return model
+
+
+class Logits(torch.nn.Module):
+    """Return the bare tensor.
+
+    transformers 5 removed the `torchscript=True` flag that used to make CTC
+    models traceable. Wrapping the module and returning logits is the
+    version-proof equivalent, and it keeps the Core ML output a single tensor.
+    """
+
+    def __init__(self, model: AutoModelForCTC) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, input_values: torch.Tensor) -> torch.Tensor:
+        return self.model(input_values).logits
 
 
 def trace(model: AutoModelForCTC) -> torch.jit.ScriptModule:
@@ -46,7 +62,7 @@ def trace(model: AutoModelForCTC) -> torch.jit.ScriptModule:
     """
     dummy = torch.rand(1, SAMPLE_RATE)
     with torch.no_grad():
-        return torch.jit.trace(model, dummy)
+        return torch.jit.trace(Logits(model), dummy)
 
 
 def input_types() -> list[ct.TensorType]:
