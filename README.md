@@ -48,13 +48,21 @@ One precision at a time:
 Run `make bench` on your own machine — the numbers are device-specific and a table
 copied from someone else's laptop is marketing, not measurement. It reports size on
 disk, cold load, warm latency at 1/5/10/30 seconds, and token agreement with the PyTorch
-reference.
+reference. Mine, Apple M4, ten runs per length, median:
 
 | Package | Size | Cold load | 1 s | 5 s | 10 s | 30 s | Token agreement |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Phoneme-FP32 | — | — | — | — | — | — | — |
-| Phoneme-FP16 | — | — | — | — | — | — | — |
-| Phoneme-INT8 | — | — | — | — | — | — | — |
+| Phoneme-FP32 | 1262 MB | 5.4 s | 24 ms | 83 ms | 166 ms | 534 ms | 100.0% |
+| Phoneme-FP16 | 631 MB | 64 s | 13 ms | 65 ms | 127 ms | 402 ms | 100.0% |
+| Phoneme-INT8 | 318 MB | 4.0 s | 24 ms | 83 ms | 166 ms | 536 ms | 99.6% |
+
+Two rows tell the story. FP16 is the model that shipped: warm latency roughly half of
+FP32, same token agreement, half the size — but a cold load that costs about a minute,
+because Core ML compiles the half-precision program in-process on first use. A one-time
+runtime download hides that behind a progress bar; a bundled model would show it, so the
+real fix is shipping the compiled `.mlmodelc`. INT8 lands exactly where weight-only
+quantization implies: half of FP16's disk footprint, no latency win (activations stay in
+float), and argmax divergence on 0.4% of frames.
 
 The row that matters is not the fastest one. It is the smallest package that still
 agrees with PyTorch on the tokens, because a pronunciation score that is 2% wrong is
@@ -73,8 +81,8 @@ PyTorch (transformers)  →  torch.jit.trace  →  coremltools  →  .mlpackage
   `ct.RangeDim(1, 480_000, 16_000)` declares the runtime input range. Tracing and shape
   declaration are separate steps.
 - **Three precisions, one interface.** FP32 is the reference, FP16 is the default
-  shipping candidate, INT8 is the experiment. Each keeps the same input name and shape so
-  they can be swapped behind one Swift protocol.
+  shipping candidate, INT8 is weight-only quantization of the FP32 package. Each keeps the
+  same input name and shape so they can be swapped behind one Swift protocol.
 
 ## Layout
 
@@ -89,9 +97,10 @@ models/              generated packages (gitignored)
 
 ## Limitations
 
-- **INT8 calibration defaults to random noise.** Without `--calibration-dir` the
-  quantizer calibrates on synthetic audio, which is a weak proxy for speech. Point it at
-  ten 16 kHz mono wavs before trusting the INT8 row.
+- **INT8 is weight-only.** Activations stay in float, because coremltools' activation
+  quantizer raises a scale-dtype mismatch on this graph in both 8.3 and 9.0. The exact
+  error is in `docs/REPORT.md`. The size win is real; the latency win is not the one
+  "INT8" usually implies.
 - **Thirty seconds is a hard ceiling.** Longer audio has to be chunked by the caller.
 - **No streaming.** This is utterance-level: record, then score. A real-time version
   needs a different input contract and a VAD in front of it.
@@ -100,7 +109,11 @@ models/              generated packages (gitignored)
 
 ## What I'd do next
 
-- Calibrate INT8 on real speech and report the accuracy cost per millisecond saved.
+- Pre-compile the FP16 package to `.mlmodelc` at build time — a bundled model that takes
+  a minute on first launch is not acceptable, and the runtime download that hid it only
+  works when the model ships over the network.
+- Ship a real calibration/eval set, even a small one, so INT8's accuracy cost is measured
+  on speech instead of noise.
 - Add a `swift/` sample app with the microphone and a latency readout, so the benchmark
   matches the experience.
 - Compare against Apple's own `SFSpeechRecognizer` for the same task, because "we need a
