@@ -1,7 +1,10 @@
-# Pinned to the combination that is known to convert. coremltools prints a
-# "torch has not been tested" warning outside this window, and transformers 5
-# removed the tracing flag this code used to rely on.
-coremltools>=8.3,<10
-numpy>=1.26,<3
-torch>=2.4,<2.9
-transformers>=4.44,<5
+# The stack this conversion was originally built on, pinned exactly.
+# Python 3.11 required: coremltools 8.3 has no wheels for 3.15.
+#
+# transformers is pinned below 5 on purpose. Version 5 removed the
+# `torchscript=True` flag that makes a CTC model traceable, which is the
+# whole conversion technique.
+coremltools==8.3.0
+numpy==2.3.3
+torch==2.8.0
+transformers==4.53.3
