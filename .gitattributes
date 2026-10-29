@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+*.mlpackage binary
+*.mlmodel binary

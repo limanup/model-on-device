@@ -1,0 +1,16 @@
+# generated
+.venv/
+models/
+benchmarks/*.json
+
+# python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Core ML packages are large and regenerable. Never commit them; run
+# `make convert` instead. This is what the original repo got wrong.
+*.mlpackage/
+*.mlmodelc/
